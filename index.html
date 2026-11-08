@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Retorno da TV</title>
+<style>
+:root{--bg:#f6f6f4;--fg:#1a1a1a;--card:#fff;--bd:#d8d8d4;--ac:#2563eb;--red:#c62828;--mut:#666}
+@media (prefers-color-scheme:dark){:root{--bg:#121212;--fg:#eee;--card:#1e1e1e;--bd:#333;--ac:#4f8cff;--mut:#999}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom))}
+main{max-width:560px;margin:0 auto}
+h1{font-size:1.3rem;margin:4px 0 14px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:12px}
+button{font:inherit;width:100%;padding:13px;margin-top:8px;border:0;border-radius:10px;background:var(--ac);color:#fff;cursor:pointer}
+button.s{background:transparent;color:var(--fg);border:1px solid var(--bd)}
+button.r{background:var(--red)}
+input{font:inherit;width:100%;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--fg);margin-top:6px}
+#code{text-align:center;letter-spacing:.3em;text-transform:uppercase;font-size:1.4rem}
+label{font-size:.85rem;color:var(--mut)}
+video{width:100%;background:#000;border-radius:10px;margin-top:10px}
+.big{font-size:2.2rem;font-weight:700;letter-spacing:.25em;text-align:center;margin:8px 0}
+#qr{text-align:center;background:#fff;border-radius:10px;padding:10px}
+#qr svg{width:220px;height:220px}
+#st{font-size:.9rem;color:var(--mut);margin-top:8px}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<main>
+<h1>📺 Retorno da TV</h1>
+
+<div id="home" class="card">
+  <button onclick="tela('criar')">Criar transmissão</button>
+  <button class="s" onclick="tela('acessar')">Acessar transmissão</button>
+</div>
+
+<div id="criar" class="card hide">
+  <label for="nome">Nome da transmissão</label>
+  <input id="nome" value="Retorno da TV" maxlength="40">
+  <button id="bShare" onclick="compartilhar()">Compartilhar tela</button>
+  <button id="bStop" class="r hide" onclick="encerrar()">⏹ Encerrar transmissão</button>
+  <div id="acesso" class="hide">
+    <button class="s" onclick="novoAcesso(true)">Gerar QR code</button>
+    <button class="s" onclick="novoAcesso(false)">Gerar código de acesso</button>
+    <div id="painel" class="hide" style="margin-top:12px">
+      <div id="qr" class="hide"></div>
+      <div id="big" class="big"></div>
+      <div id="tempo" style="text-align:center;color:var(--mut);font-size:.9rem"></div>
+    </div>
+  </div>
+  <div id="st1" id="st"></div>
+  <button class="s" onclick="voltar()">Voltar</button>
+</div>
+
+<div id="acessar" class="card hide">
+  <label for="code">Código de acesso (5 caracteres)</label>
+  <input id="code" maxlength="5" autocomplete="off">
+  <button id="bVer" onclick="ver()">Ver compartilhamento</button>
+  <button id="bPara" class="r hide" onclick="parar()">⏹ Parar de ver</button>
+  <div id="st2" id="st"></div>
+  <div id="vnome" style="margin-top:8px;font-weight:600"></div>
+  <video id="vid" autoplay playsinline muted controls class="hide"></video>
+  <button id="bFull" class="s hide" onclick="document.getElementById('vid').requestFullscreen()">Tela cheia</button>
+  <button class="s" onclick="voltar()">Voltar</button>
+</div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const PRE="retornotv-";
+const ALFA="23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+const rand5=()=>Array.from({length:5},()=>ALFA[Math.floor(Math.random()*ALFA.length)]).join("");
+const msg=(id,t)=>$(id).textContent=t;
+function tela(n){["home","criar","acessar"].forEach(x=>$(x).classList.toggle("hide",x!==n))}
+function voltar(){encerrar();parar();tela("home")}
+
+/* ---------- Criar transmissão ---------- */
+let main=null, stream=null, door=null, doorTimer=null, tick=null;
+
+async function compartilhar(){
+  try{
+    const md=navigator.mediaDevices;
+    if(md&&md.getDisplayMedia){
+      stream=await md.getDisplayMedia({video:{frameRate:30},audio:false});
+    }else if(md&&md.getUserMedia){
+      stream=await md.getUserMedia({video:true});
+      msg("st1","Este aparelho não compartilha tela; usando a câmera.");
+    }else throw new Error("navegador sem suporte");
+    try{stream.getVideoTracks()[0].contentHint="motion"}catch(e){}
+    stream.getVideoTracks()[0].onended=encerrar;
+    main=new Peer();
+    main.on("open",()=>{
+      $("bShare").classList.add("hide");$("bStop").classList.remove("hide");
+      $("acesso").classList.remove("hide");
+      msg("st1","Transmitindo. Gere um QR code ou código pra quem vai assistir.");
+    });
+    main.on("error",e=>msg("st1","Erro de conexão: "+e.type));
+  }catch(e){msg("st1","Erro: "+e.message)}
+}
+
+function fecharPorta(){
+  clearTimeout(doorTimer);clearInterval(tick);
+  if(door){try{door.destroy()}catch(e){}door=null}
+  $("painel").classList.add("hide");
+}
+
+function novoAcesso(comQR){
+  fecharPorta();
+  const code=rand5();
+  const d=new Peer(PRE+code);
+  door=d;
+  d.on("error",e=>{
+    if(e.type==="unavailable-id"){d.destroy();novoAcesso(comQR)}
+    else msg("st1","Erro: "+e.type);
+  });
+  d.on("open",()=>{
+    $("painel").classList.remove("hide");
+    $("big").textContent=code;
+    const q=$("qr");
+    if(comQR&&window.qrcode){
+      const url=location.origin+location.pathname+"#c="+code;
+      const o=qrcode(0,"M");o.addData(url);o.make();
+      q.innerHTML=o.createSvgTag({scale:6,margin:2});
+      q.classList.remove("hide");
+    }else q.classList.add("hide");
+    let s=60;
+    $("tempo").textContent="Vale por "+s+"s e só pode ser usado uma vez";
+    tick=setInterval(()=>{s--;$("tempo").textContent="Vale por "+s+"s e só pode ser usado uma vez"},1000);
+    doorTimer=setTimeout(fecharPorta,60000);
+  });
+  d.on("connection",c=>{
+    c.on("open",()=>{
+      c.send({nome:$("nome").value||"Retorno da TV"});
+      const call=main.call(c.peer,stream);
+      try{
+        call.peerConnection.getSenders().forEach(snd=>{
+          const p=snd.getParameters();
+          if(!p.encodings||!p.encodings.length)p.encodings=[{}];
+          p.encodings[0].maxBitrate=5000000;snd.setParameters(p);
+        });
+      }catch(e){}
+      msg("st1","Alguém entrou na transmissão.");
+      fecharPorta();
+    });
+  });
+}
+
+function encerrar(){
+  fecharPorta();
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  if(main){main.destroy();main=null}
+  $("bStop").classList.add("hide");$("acesso").classList.add("hide");$("bShare").classList.remove("hide");
+  if(!$("criar").classList.contains("hide"))msg("st1","Transmissão encerrada.");
+}
+
+/* ---------- Acessar transmissão ---------- */
+let vp=null, vtimer=null;
+
+function ver(){
+  const code=$("code").value.trim().toUpperCase();
+  if(code.length!==5){msg("st2","Digite os 5 caracteres do código.");return}
+  parar(true);
+  msg("st2","Conectando…");
+  $("bVer").classList.add("hide");$("bPara").classList.remove("hide");
+  vp=new Peer();
+  vp.on("open",()=>{
+    const c=vp.connect(PRE+code);
+    c.on("data",d=>{if(d&&d.nome)$("vnome").textContent=d.nome});
+    vtimer=setTimeout(()=>{msg("st2","Código inválido ou expirado.");parar(true)},12000);
+  });
+  vp.on("call",call=>{
+    clearTimeout(vtimer);
+    call.answer();
+    call.on("stream",s=>{
+      try{call.peerConnection.getReceivers().forEach(r=>{try{r.playoutDelayHint=0}catch(e){}try{r.jitterBufferTarget=0}catch(e){}})}catch(e){}
+      $("vid").srcObject=s;$("vid").classList.remove("hide");$("bFull").classList.remove("hide");
+      msg("st2","Assistindo.");
+    });
+    call.on("close",()=>{parar(true);msg("st2","A transmissão foi encerrada.")});
+  });
+  vp.on("error",e=>{
+    msg("st2",e.type==="peer-unavailable"?"Código inválido ou expirado.":"Erro: "+e.type);
+    parar(true);
+  });
+}
+
+function parar(silencio){
+  clearTimeout(vtimer);
+  if(vp){const p=vp;vp=null;p.destroy()}
+  $("vid").srcObject=null;$("vid").classList.add("hide");$("bFull").classList.add("hide");
+  $("bPara").classList.add("hide");$("bVer").classList.remove("hide");
+  $("vnome").textContent="";
+  if(silencio!==true&&!$("acessar").classList.contains("hide"))msg("st2","Você parou de ver.");
+}
+
+/* QR: abre direto com o código */
+const m=location.hash.match(/c=([A-Za-z0-9]{5})/);
+if(m){
+  history.replaceState(null,"",location.pathname);
+  tela("acessar");$("code").value=m[1].toUpperCase();ver();
+}
+</script>
+</body>
+</html>
