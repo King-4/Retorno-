@@ -15,14 +15,14 @@ h1{font-size:1.3rem;margin:4px 0 14px}
 button{font:inherit;width:100%;padding:13px;margin-top:8px;border:0;border-radius:10px;background:var(--ac);color:#fff;cursor:pointer}
 button.s{background:transparent;color:var(--fg);border:1px solid var(--bd)}
 button.r{background:var(--red)}
-input{font:inherit;width:100%;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--fg);margin-top:6px}
+input,select{font:inherit;width:100%;padding:12px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--fg);margin-top:6px}
 #code{text-align:center;letter-spacing:.3em;text-transform:uppercase;font-size:1.4rem}
-label{font-size:.85rem;color:var(--mut)}
+label{font-size:.85rem;color:var(--mut);display:block;margin-top:8px}
 video{width:100%;background:#000;border-radius:10px;margin-top:10px}
 .big{font-size:2.2rem;font-weight:700;letter-spacing:.25em;text-align:center;margin:8px 0}
 #qr{text-align:center;background:#fff;border-radius:10px;padding:10px}
 #qr svg{width:220px;height:220px}
-#st{font-size:.9rem;color:var(--mut);margin-top:8px}
+.st{font-size:.9rem;color:var(--mut);margin-top:8px}
 .hide{display:none!important}
 </style>
 </head>
@@ -38,6 +38,11 @@ video{width:100%;background:#000;border-radius:10px;margin-top:10px}
 <div id="criar" class="card hide">
   <label for="nome">Nome da transmissão</label>
   <input id="nome" value="Retorno da TV" maxlength="40">
+  <label for="qual">Qualidade</label>
+  <select id="qual">
+    <option value="nitido">Nítida (melhor pra textos e slides)</option>
+    <option value="fluido">Fluida (melhor pra vídeo em movimento)</option>
+  </select>
   <button id="bShare" onclick="compartilhar()">Compartilhar tela</button>
   <button id="bStop" class="r hide" onclick="encerrar()">⏹ Encerrar transmissão</button>
   <div id="acesso" class="hide">
@@ -49,20 +54,26 @@ video{width:100%;background:#000;border-radius:10px;margin-top:10px}
       <div id="tempo" style="text-align:center;color:var(--mut);font-size:.9rem"></div>
     </div>
   </div>
-  <div id="st1" id="st"></div>
+  <div id="st1" class="st"></div>
   <button class="s" onclick="voltar()">Voltar</button>
 </div>
 
 <div id="acessar" class="card hide">
-  <label for="code">Código de acesso (5 caracteres)</label>
-  <input id="code" maxlength="5" autocomplete="off">
-  <button id="bVer" onclick="ver()">Ver compartilhamento</button>
-  <button id="bPara" class="r hide" onclick="parar()">⏹ Parar de ver</button>
-  <div id="st2" id="st"></div>
-  <div id="vnome" style="margin-top:8px;font-weight:600"></div>
-  <video id="vid" autoplay playsinline muted controls class="hide"></video>
-  <button id="bFull" class="s hide" onclick="document.getElementById('vid').requestFullscreen()">Tela cheia</button>
-  <button class="s" onclick="voltar()">Voltar</button>
+  <div id="entrada">
+    <label for="code">Código de acesso (5 caracteres)</label>
+    <input id="code" maxlength="5" autocomplete="off">
+    <button onclick="entrar()">Entrar na transmissão</button>
+  </div>
+  <div id="sessao" class="hide">
+    <div id="vnome" style="font-weight:600"></div>
+    <button id="bVer" onclick="assistir()">Ver compartilhamento</button>
+    <button id="bPara" class="r hide" onclick="pararVer()">⏹ Parar de ver</button>
+    <video id="vid" autoplay playsinline muted controls class="hide"></video>
+    <button id="bFull" class="s hide" onclick="document.getElementById('vid').requestFullscreen()">Tela cheia</button>
+    <button class="s" onclick="sair()">Sair da transmissão</button>
+  </div>
+  <div id="st2" class="st"></div>
+  <button id="bVoltar" class="s" onclick="voltar()">Voltar</button>
 </div>
 </main>
 
@@ -74,28 +85,38 @@ const PRE="retornotv-";
 const ALFA="23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const rand5=()=>Array.from({length:5},()=>ALFA[Math.floor(Math.random()*ALFA.length)]).join("");
 const msg=(id,t)=>$(id).textContent=t;
+const MAXBR=8000; /* kbps */
 function tela(n){["home","criar","acessar"].forEach(x=>$(x).classList.toggle("hide",x!==n))}
-function voltar(){encerrar();parar();tela("home")}
+function voltar(){encerrar();sair();tela("home")}
+/* sobe o limite de banda no SDP (b=AS) pra imagem não ficar borrada */
+function sdpBanda(sdp){return sdp.replace(/(m=video[^\r\n]*\r\n(?:c=[^\r\n]*\r\n)?)(?!b=)/,"$1b=AS:"+MAXBR+"\r\n")}
 
 /* ---------- Criar transmissão ---------- */
 let main=null, stream=null, door=null, doorTimer=null, tick=null;
+const sessions=new Map(); /* idDoViewer -> {ch, call} */
+
+function status(){
+  msg("st1",sessions.size?("Pessoas conectadas: "+sessions.size):"Transmitindo. Gere um QR code ou código pra quem vai assistir.");
+}
 
 async function compartilhar(){
   try{
+    const nitido=$("qual").value==="nitido";
     const md=navigator.mediaDevices;
     if(md&&md.getDisplayMedia){
-      stream=await md.getDisplayMedia({video:{frameRate:30},audio:false});
+      stream=await md.getDisplayMedia({video:{frameRate:{ideal:nitido?20:30},width:{ideal:1920},height:{ideal:1080}},audio:false});
     }else if(md&&md.getUserMedia){
       stream=await md.getUserMedia({video:true});
       msg("st1","Este aparelho não compartilha tela; usando a câmera.");
     }else throw new Error("navegador sem suporte");
-    try{stream.getVideoTracks()[0].contentHint="motion"}catch(e){}
-    stream.getVideoTracks()[0].onended=encerrar;
+    const vt=stream.getVideoTracks()[0];
+    try{vt.contentHint=nitido?"detail":"motion"}catch(e){}
+    vt.onended=encerrar;
     main=new Peer();
     main.on("open",()=>{
       $("bShare").classList.add("hide");$("bStop").classList.remove("hide");
       $("acesso").classList.remove("hide");
-      msg("st1","Transmitindo. Gere um QR code ou código pra quem vai assistir.");
+      status();
     });
     main.on("error",e=>msg("st1","Erro de conexão: "+e.type));
   }catch(e){msg("st1","Erro: "+e.message)}
@@ -127,29 +148,68 @@ function novoAcesso(comQR){
       q.classList.remove("hide");
     }else q.classList.add("hide");
     let s=60;
-    $("tempo").textContent="Vale por "+s+"s e só pode ser usado uma vez";
-    tick=setInterval(()=>{s--;$("tempo").textContent="Vale por "+s+"s e só pode ser usado uma vez"},1000);
+    const t=()=>$("tempo").textContent="Vale por "+s+"s pra entrar, uma pessoa só";
+    t();
+    tick=setInterval(()=>{s--;t()},1000);
     doorTimer=setTimeout(fecharPorta,60000);
   });
+  /* a porta só serve pra entrar; a sessão fica no peer principal */
+  let used=false;
   d.on("connection",c=>{
     c.on("open",()=>{
-      c.send({nome:$("nome").value||"Retorno da TV"});
-      const call=main.call(c.peer,stream);
-      try{
-        call.peerConnection.getSenders().forEach(snd=>{
-          const p=snd.getParameters();
-          if(!p.encodings||!p.encodings.length)p.encodings=[{}];
-          p.encodings[0].maxBitrate=5000000;snd.setParameters(p);
-        });
-      }catch(e){}
-      msg("st1","Alguém entrou na transmissão.");
+      if(used){c.close();return}
+      used=true;
+      const id=c.peer;
+      const ch=main.connect(id,{reliable:true});
+      ch.on("open",()=>{
+        sessions.set(id,{ch,call:null});
+        ch.send({nome:$("nome").value||"Retorno da TV"});
+        status();
+      });
+      ch.on("data",m=>{
+        if(!m)return;
+        if(m.cmd==="watch")iniciar(id);
+        if(m.cmd==="stop")fecharCall(id);
+      });
+      ch.on("close",()=>{fecharCall(id);sessions.delete(id);status()});
       fecharPorta();
     });
   });
 }
 
+function iniciar(id){
+  const s=sessions.get(id);
+  if(!s||!stream||!main)return;
+  fecharCall(id);
+  const call=main.call(id,stream,{sdpTransform:sdpBanda});
+  s.call=call;
+  call.on("close",()=>{if(s.call===call)s.call=null});
+  const pc=call.peerConnection;
+  pc.addEventListener("connectionstatechange",()=>{
+    if(pc.connectionState!=="connected")return;
+    const nitido=$("qual").value==="nitido";
+    try{
+      pc.getSenders().forEach(snd=>{
+        if(!snd.track||snd.track.kind!=="video")return;
+        const p=snd.getParameters();
+        if(!p.encodings||!p.encodings.length)p.encodings=[{}];
+        p.encodings[0].maxBitrate=MAXBR*1000;
+        p.encodings[0].scaleResolutionDownBy=1;
+        p.degradationPreference=nitido?"maintain-resolution":"balanced";
+        snd.setParameters(p);
+      });
+    }catch(e){}
+  });
+}
+function fecharCall(id){
+  const s=sessions.get(id);
+  if(s&&s.call){try{s.call.close()}catch(e){}s.call=null}
+}
+
 function encerrar(){
   fecharPorta();
+  sessions.forEach((s,id)=>{fecharCall(id);try{s.ch.close()}catch(e){}});
+  sessions.clear();
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
   if(main){main.destroy();main=null}
   $("bStop").classList.add("hide");$("acesso").classList.add("hide");$("bShare").classList.remove("hide");
@@ -157,50 +217,77 @@ function encerrar(){
 }
 
 /* ---------- Acessar transmissão ---------- */
-let vp=null, vtimer=null;
+let vp=null, vch=null, vcall=null, vtimer=null;
 
-function ver(){
+function entrar(){
   const code=$("code").value.trim().toUpperCase();
   if(code.length!==5){msg("st2","Digite os 5 caracteres do código.");return}
-  parar(true);
+  sair(true);
   msg("st2","Conectando…");
-  $("bVer").classList.add("hide");$("bPara").classList.remove("hide");
   vp=new Peer();
   vp.on("open",()=>{
-    const c=vp.connect(PRE+code);
-    c.on("data",d=>{if(d&&d.nome)$("vnome").textContent=d.nome});
-    vtimer=setTimeout(()=>{msg("st2","Código inválido ou expirado.");parar(true)},12000);
+    vp.connect(PRE+code);
+    vtimer=setTimeout(()=>{msg("st2","Código inválido ou expirado.");sair(true)},12000);
+  });
+  vp.on("connection",ch=>{
+    clearTimeout(vtimer);
+    vch=ch;
+    const ok=()=>{
+      $("entrada").classList.add("hide");$("sessao").classList.remove("hide");
+      $("bVoltar").classList.add("hide");
+      msg("st2","Você entrou. Pode ver e parar de ver quando quiser.");
+      assistir();
+    };
+    if(ch.open)ok();else ch.on("open",ok);
+    ch.on("data",d=>{if(d&&d.nome)$("vnome").textContent=d.nome});
+    ch.on("close",()=>{if(vch===ch){sair(true);msg("st2","A transmissão foi encerrada.")}});
   });
   vp.on("call",call=>{
-    clearTimeout(vtimer);
-    call.answer();
+    vcall=call;
+    call.answer(undefined,{sdpTransform:sdpBanda});
     call.on("stream",s=>{
       try{call.peerConnection.getReceivers().forEach(r=>{try{r.playoutDelayHint=0}catch(e){}try{r.jitterBufferTarget=0}catch(e){}})}catch(e){}
       $("vid").srcObject=s;$("vid").classList.remove("hide");$("bFull").classList.remove("hide");
-      msg("st2","Assistindo.");
+      $("bVer").classList.add("hide");$("bPara").classList.remove("hide");
     });
-    call.on("close",()=>{parar(true);msg("st2","A transmissão foi encerrada.")});
+    call.on("close",()=>{if(vcall===call)esconderVideo()});
   });
   vp.on("error",e=>{
     msg("st2",e.type==="peer-unavailable"?"Código inválido ou expirado.":"Erro: "+e.type);
-    parar(true);
+    sair(true);
   });
 }
 
-function parar(silencio){
-  clearTimeout(vtimer);
-  if(vp){const p=vp;vp=null;p.destroy()}
+function assistir(){
+  if(vch&&vch.open){vch.send({cmd:"watch"});msg("st2","Conectando a imagem…")}
+}
+function esconderVideo(){
   $("vid").srcObject=null;$("vid").classList.add("hide");$("bFull").classList.add("hide");
   $("bPara").classList.add("hide");$("bVer").classList.remove("hide");
+}
+function pararVer(){
+  if(vcall){try{vcall.close()}catch(e){}vcall=null}
+  if(vch&&vch.open)vch.send({cmd:"stop"});
+  esconderVideo();
+  msg("st2","Você parou de ver. Toque em Ver compartilhamento pra voltar.");
+}
+function sair(silencio){
+  clearTimeout(vtimer);
+  const p=vp,c=vch;vp=null;vch=null;vcall=null;
+  if(c){try{c.close()}catch(e){}}
+  if(p){try{p.destroy()}catch(e){}}
+  esconderVideo();
+  $("sessao").classList.add("hide");$("entrada").classList.remove("hide");
+  $("bVoltar").classList.remove("hide");
   $("vnome").textContent="";
-  if(silencio!==true&&!$("acessar").classList.contains("hide"))msg("st2","Você parou de ver.");
+  if(silencio!==true&&!$("acessar").classList.contains("hide"))msg("st2","Você saiu da transmissão.");
 }
 
 /* QR: abre direto com o código */
 const m=location.hash.match(/c=([A-Za-z0-9]{5})/);
 if(m){
   history.replaceState(null,"",location.pathname);
-  tela("acessar");$("code").value=m[1].toUpperCase();ver();
+  tela("acessar");$("code").value=m[1].toUpperCase();entrar();
 }
 </script>
 </body>
