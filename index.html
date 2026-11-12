@@ -45,14 +45,10 @@ video{width:100%;background:#000;border-radius:10px;margin-top:10px}
   </select>
   <button id="bShare" onclick="compartilhar()">Compartilhar tela</button>
   <button id="bStop" class="r hide" onclick="encerrar()">⏹ Encerrar transmissão</button>
-  <div id="acesso" class="hide">
-    <button class="s" onclick="novoAcesso(true)">Gerar QR code</button>
-    <button class="s" onclick="novoAcesso(false)">Gerar código de acesso</button>
-    <div id="painel" class="hide" style="margin-top:12px">
-      <div id="qr" class="hide"></div>
-      <div id="big" class="big"></div>
-      <div id="tempo" style="text-align:center;color:var(--mut);font-size:.9rem"></div>
-    </div>
+  <div id="painel" class="hide" style="margin-top:12px">
+    <div id="qr" class="hide"></div>
+    <div id="big" class="big"></div>
+    <div style="text-align:center;color:var(--mut);font-size:.9rem">QR code e código valem até você encerrar a transmissão</div>
   </div>
   <div id="st1" class="st"></div>
   <button class="s" onclick="voltar()">Voltar</button>
@@ -92,11 +88,11 @@ function voltar(){encerrar();sair();tela("home")}
 function sdpBanda(sdp){return sdp.replace(/(m=video[^\r\n]*\r\n(?:c=[^\r\n]*\r\n)?)(?!b=)/,"$1b=AS:"+MAXBR+"\r\n")}
 
 /* ---------- Criar transmissão ---------- */
-let main=null, stream=null, door=null, doorTimer=null, tick=null;
+let main=null, stream=null, hb=null;
 const sessions=new Map(); /* idDoViewer -> {ch, call} */
 
 function status(){
-  msg("st1",sessions.size?("Pessoas conectadas: "+sessions.size):"Transmitindo. Gere um QR code ou código pra quem vai assistir.");
+  msg("st1",sessions.size?("Pessoas conectadas: "+sessions.size):"Transmitindo. Mostre o QR code ou passe o código pra quem vai assistir.");
 }
 
 async function compartilhar(){
@@ -112,68 +108,58 @@ async function compartilhar(){
     const vt=stream.getVideoTracks()[0];
     try{vt.contentHint=nitido?"detail":"motion"}catch(e){}
     vt.onended=encerrar;
-    main=new Peer();
-    main.on("open",()=>{
-      $("bShare").classList.add("hide");$("bStop").classList.remove("hide");
-      $("acesso").classList.remove("hide");
-      status();
-    });
-    main.on("error",e=>msg("st1","Erro de conexão: "+e.type));
+    criarSala(0);
   }catch(e){msg("st1","Erro: "+e.message)}
 }
 
-function fecharPorta(){
-  clearTimeout(doorTimer);clearInterval(tick);
-  if(door){try{door.destroy()}catch(e){}door=null}
-  $("painel").classList.add("hide");
-}
-
-function novoAcesso(comQR){
-  fecharPorta();
+/* a sala é um peer com id fixo (PRE+código): vale até encerrar */
+function criarSala(tentativa){
   const code=rand5();
-  const d=new Peer(PRE+code);
-  door=d;
-  d.on("error",e=>{
-    if(e.type==="unavailable-id"){d.destroy();novoAcesso(comQR)}
-    else msg("st1","Erro: "+e.type);
-  });
-  d.on("open",()=>{
+  const p=new Peer(PRE+code);
+  main=p;
+  p.on("open",()=>{
+    $("bShare").classList.add("hide");$("bStop").classList.remove("hide");
     $("painel").classList.remove("hide");
     $("big").textContent=code;
     const q=$("qr");
-    if(comQR&&window.qrcode){
+    if(window.qrcode){
       const url=location.origin+location.pathname+"#c="+code;
       const o=qrcode(0,"M");o.addData(url);o.make();
       q.innerHTML=o.createSvgTag({scale:6,margin:2});
       q.classList.remove("hide");
-    }else q.classList.add("hide");
-    let s=60;
-    const t=()=>$("tempo").textContent="Vale por "+s+"s pra entrar, uma pessoa só";
-    t();
-    tick=setInterval(()=>{s--;t()},1000);
-    doorTimer=setTimeout(fecharPorta,60000);
+    }
+    status();
+    clearInterval(hb);
+    /* batimento: manda ping e remove quem ficou 8s sem responder (aba fechada à força) */
+    hb=setInterval(()=>{
+      const now=Date.now();
+      sessions.forEach((s,id)=>{
+        if(now-s.seen>(s.away?180000:8000))dropSession(id);
+        else if(s.ch.open){try{s.ch.send({cmd:"ping"})}catch(e){}}
+      });
+    },2000);
   });
-  /* a porta só serve pra entrar; a sessão fica no peer principal */
-  let used=false;
-  d.on("connection",c=>{
+  p.on("error",e=>{
+    if(e.type==="unavailable-id"&&tentativa<5){p.destroy();criarSala(tentativa+1)}
+    else msg("st1","Erro de conexão: "+e.type);
+  });
+  p.on("disconnected",()=>{if(main===p&&!p.destroyed){try{p.reconnect()}catch(e){}}});
+  p.on("connection",c=>{
     c.on("open",()=>{
-      if(used){c.close();return}
-      used=true;
       const id=c.peer;
-      const ch=main.connect(id,{reliable:true});
-      ch.on("open",()=>{
-        sessions.set(id,{ch,call:null});
-        ch.send({nome:$("nome").value||"Retorno da TV"});
-        status();
-      });
-      ch.on("data",m=>{
-        if(!m)return;
-        if(m.cmd==="watch")iniciar(id);
-        if(m.cmd==="stop")fecharCall(id);
-      });
-      ch.on("close",()=>{fecharCall(id);sessions.delete(id);status()});
-      fecharPorta();
+      sessions.set(id,{ch:c,call:null,seen:Date.now()});
+      c.send({nome:$("nome").value||"Retorno da TV"});
+      status();
     });
+    c.on("data",m=>{
+      if(!m)return;
+      const s=sessions.get(c.peer);
+      if(s){s.seen=Date.now();s.away=(m.cmd==="away")}
+      if(m.cmd==="watch")iniciar(c.peer);
+      if(m.cmd==="stop")fecharCall(c.peer);
+      if(m.cmd==="bye")dropSession(c.peer);
+    });
+    c.on("close",()=>dropSession(c.peer));
   });
 }
 
@@ -201,45 +187,61 @@ function iniciar(id){
     }catch(e){}
   });
 }
+function dropSession(id){
+  const s=sessions.get(id);
+  if(!s)return;
+  fecharCall(id);
+  sessions.delete(id);
+  try{s.ch.close()}catch(e){}
+  status();
+}
 function fecharCall(id){
   const s=sessions.get(id);
   if(s&&s.call){try{s.call.close()}catch(e){}s.call=null}
 }
 
 function encerrar(){
-  fecharPorta();
+  clearInterval(hb);
   sessions.forEach((s,id)=>{fecharCall(id);try{s.ch.close()}catch(e){}});
   sessions.clear();
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
-  if(main){main.destroy();main=null}
-  $("bStop").classList.add("hide");$("acesso").classList.add("hide");$("bShare").classList.remove("hide");
-  if(!$("criar").classList.contains("hide"))msg("st1","Transmissão encerrada.");
+  if(main){const p=main;main=null;p.destroy()}
+  $("painel").classList.add("hide");$("qr").classList.add("hide");
+  $("bStop").classList.add("hide");$("bShare").classList.remove("hide");
+  if(!$("criar").classList.contains("hide"))msg("st1","Transmissão encerrada. O QR code e o código antigos não valem mais.");
 }
 
 /* ---------- Acessar transmissão ---------- */
-let vp=null, vch=null, vcall=null, vtimer=null;
+let vp=null, vch=null, vcall=null, vtimer=null, vhb=null, lastHost=0, vendo=false, wantCode=null;
 
 function entrar(){
   const code=$("code").value.trim().toUpperCase();
   if(code.length!==5){msg("st2","Digite os 5 caracteres do código.");return}
+  wantCode=code;
   sair(true);
   msg("st2","Conectando…");
   vp=new Peer();
   vp.on("open",()=>{
-    vp.connect(PRE+code);
-    vtimer=setTimeout(()=>{msg("st2","Código inválido ou expirado.");sair(true)},12000);
-  });
-  vp.on("connection",ch=>{
-    clearTimeout(vtimer);
+    const ch=vp.connect(PRE+code,{reliable:true});
     vch=ch;
-    const ok=()=>{
+    vtimer=setTimeout(()=>{msg("st2","Código inválido ou transmissão encerrada.");sair(true)},12000);
+    ch.on("open",()=>{
+      clearTimeout(vtimer);
+      lastHost=Date.now();
+      clearInterval(vhb);
+      vhb=setInterval(()=>{
+        if(vch===ch&&ch.open){try{ch.send({cmd:"ping"})}catch(e){}}
+        if(vch===ch&&!document.hidden&&Date.now()-lastHost>8000){
+          sair(true);msg("st2","Conexão perdida. Reconectando…");
+          if(wantCode){$("code").value=wantCode;entrar()}
+        }
+      },2000);
       $("entrada").classList.add("hide");$("sessao").classList.remove("hide");
       $("bVoltar").classList.add("hide");
       msg("st2","Você entrou. Pode ver e parar de ver quando quiser.");
       assistir();
-    };
-    if(ch.open)ok();else ch.on("open",ok);
-    ch.on("data",d=>{if(d&&d.nome)$("vnome").textContent=d.nome});
+    });
+    ch.on("data",d=>{lastHost=Date.now();if(d&&d.nome)$("vnome").textContent=d.nome});
     ch.on("close",()=>{if(vch===ch){sair(true);msg("st2","A transmissão foi encerrada.")}});
   });
   vp.on("call",call=>{
@@ -249,11 +251,13 @@ function entrar(){
       try{call.peerConnection.getReceivers().forEach(r=>{try{r.playoutDelayHint=0}catch(e){}try{r.jitterBufferTarget=0}catch(e){}})}catch(e){}
       $("vid").srcObject=s;$("vid").classList.remove("hide");$("bFull").classList.remove("hide");
       $("bVer").classList.add("hide");$("bPara").classList.remove("hide");
+      vendo=true;
     });
     call.on("close",()=>{if(vcall===call)esconderVideo()});
   });
   vp.on("error",e=>{
-    msg("st2",e.type==="peer-unavailable"?"Código inválido ou expirado.":"Erro: "+e.type);
+    if(e.type==="peer-unavailable")wantCode=null;
+    msg("st2",e.type==="peer-unavailable"?"Código inválido ou transmissão encerrada.":"Erro: "+e.type);
     sair(true);
   });
 }
@@ -266,13 +270,15 @@ function esconderVideo(){
   $("bPara").classList.add("hide");$("bVer").classList.remove("hide");
 }
 function pararVer(){
+  vendo=false;
   if(vcall){try{vcall.close()}catch(e){}vcall=null}
   if(vch&&vch.open)vch.send({cmd:"stop"});
   esconderVideo();
   msg("st2","Você parou de ver. Toque em Ver compartilhamento pra voltar.");
 }
 function sair(silencio){
-  clearTimeout(vtimer);
+  clearTimeout(vtimer);clearInterval(vhb);
+  if(silencio!==true){wantCode=null;vendo=false}
   const p=vp,c=vch;vp=null;vch=null;vcall=null;
   if(c){try{c.close()}catch(e){}}
   if(p){try{p.destroy()}catch(e){}}
@@ -282,6 +288,26 @@ function sair(silencio){
   $("vnome").textContent="";
   if(silencio!==true&&!$("acessar").classList.contains("hide"))msg("st2","Você saiu da transmissão.");
 }
+
+/* minimizar / trocar de app: avisa a sala e retoma ao voltar */
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden){
+    if(vch&&vch.open){try{vch.send({cmd:"away"})}catch(e){}}
+    return;
+  }
+  lastHost=Date.now();
+  if(vch&&vch.open){
+    try{vch.send({cmd:"ping"})}catch(e){}
+    if(vendo)assistir();
+  }else if(wantCode&&!$("acessar").classList.contains("hide")){
+    $("code").value=wantCode;entrar();
+  }
+});
+
+/* avisa a sala quando a aba é fechada */
+addEventListener("pagehide",()=>{
+  if(vch&&vch.open){try{vch.send({cmd:"bye"})}catch(e){}}
+});
 
 /* QR: abre direto com o código */
 const m=location.hash.match(/c=([A-Za-z0-9]{5})/);
